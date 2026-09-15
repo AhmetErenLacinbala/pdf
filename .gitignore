@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# production build
+dist/
+
+# local environment
+.env
+.env.*
+!.env.example
+
+# caches and logs
+*.tsbuildinfo
+*.log
+
+# editor and operating system files
+.DS_Store
+.idea/
+.vscode/
