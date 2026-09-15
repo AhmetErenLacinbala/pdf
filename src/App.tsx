@@ -1,7 +1,7 @@
 import {
-  AlignCenter, AlignLeft, AlignRight, Check, ChevronDown, CloudOff, Download,
+  Check, CloudOff, Download,
   Files, GripVertical, Layers3, LoaderCircle, MousePointer2, Plus, Redo2,
-  RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Type, Undo2, Upload, X,
+  RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
   ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
@@ -9,15 +9,6 @@ import type { PDFPageProxy } from 'pdfjs-dist';
 
 type SourceFile = {
   id: string; name: string; bytes: Uint8Array; pageCount: number; color: string;
-};
-
-type TextAnnotation = {
-  id: string;
-  text: string;
-  size: number;
-  color: string;
-  position: 'top' | 'center' | 'bottom';
-  align: 'left' | 'center' | 'right';
 };
 
 type PageItem = {
@@ -31,14 +22,13 @@ type PageItem = {
   rotation: number;
   thumbnail: string;
   outputId: string;
-  annotations: TextAnnotation[];
 };
 
 type OutputGroup = { id: string; name: string };
 type Toast = { id: number; message: string; tone?: 'success' | 'error' };
 
 const SOURCE_COLORS = ['#7c3aed', '#2563eb', '#ea580c', '#059669', '#db2777'];
-const DEFAULT_OUTPUT: OutputGroup = { id: 'output-1', name: 'Birleştirilmiş PDF' };
+const DEFAULT_OUTPUT: OutputGroup = { id: 'output-1', name: 'PDF 1' };
 const uid = () => crypto.randomUUID();
 
 function safeFileName(name: string) {
@@ -69,23 +59,19 @@ export default function Home() {
   const [importProgress, setImportProgress] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [annotationOpen, setAnnotationOpen] = useState(false);
-  const [textDraft, setTextDraft] = useState('Onaylandı');
-  const [textSize, setTextSize] = useState(18);
-  const [textColor, setTextColor] = useState('#171717');
-  const [textPosition, setTextPosition] = useState<TextAnnotation['position']>('center');
-  const [textAlign, setTextAlign] = useState<TextAnnotation['align']>('center');
   const [toast, setToast] = useState<Toast | null>(null);
 
   const visiblePages = useMemo(
     () => (activeOutput === 'all' ? pages : pages.filter((page) => page.outputId === activeOutput)),
     [activeOutput, pages],
   );
-  const selectedPages = useMemo(() => pages.filter((page) => selected.includes(page.id)), [pages, selected]);
-  const totalAnnotations = useMemo(
-    () => pages.reduce((total, page) => total + page.annotations.length, 0),
-    [pages],
-  );
+  const orderedOutputs = useMemo(() => {
+    const outputIds = [...new Set(pages.map((page) => page.outputId))];
+    return outputIds.flatMap((id) => {
+      const output = outputs.find((item) => item.id === id);
+      return output ? [output] : [];
+    });
+  }, [outputs, pages]);
 
   const notify = (message: string, tone: Toast['tone'] = 'success') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -179,6 +165,7 @@ export default function Home() {
       ).toString();
       const newSources: SourceFile[] = [];
       const newPages: PageItem[] = [];
+      const appendOutputId = pages.at(-1)?.outputId ?? DEFAULT_OUTPUT.id;
 
       for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
         const file = files[fileIndex];
@@ -197,7 +184,7 @@ export default function Home() {
             id: uid(), sourceId, sourceName: file.name,
             sourcePageIndex: pageNumber - 1, originalPageNumber: pageNumber,
             width: rendered.width, height: rendered.height, rotation: 0,
-            thumbnail: rendered.thumbnail, outputId: DEFAULT_OUTPUT.id, annotations: [],
+            thumbnail: rendered.thumbnail, outputId: appendOutputId,
           });
           pdfPage.cleanup();
         }
@@ -242,23 +229,42 @@ export default function Home() {
       ? { ...page, rotation: (page.rotation + direction * 90 + 360) % 360 } : page));
   };
 
-  const splitSelected = () => {
-    if (!selected.length) return;
-    const output: OutputGroup = { id: uid(), name: `Ayrılmış PDF ${outputs.length}` };
-    setOutputs((current) => [...current, output]);
-    updatePages((current) => current.map((page) => selected.includes(page.id)
-      ? { ...page, outputId: output.id } : page));
-    setActiveOutput(output.id);
-    setSelected([]);
-    notify(`Seçilen sayfalar “${output.name}” içine ayrıldı.`);
-  };
+  const toggleSplitAfter = (pageId: string) => {
+    const boundaryIndex = pages.findIndex((page) => page.id === pageId);
+    if (boundaryIndex < 0 || boundaryIndex >= pages.length - 1) return;
 
-  const moveSelectedToOutput = (outputId: string) => {
-    if (!selected.length || !outputId) return;
-    updatePages((current) => current.map((page) => selected.includes(page.id)
-      ? { ...page, outputId } : page));
+    const leftOutputId = pages[boundaryIndex].outputId;
+    const rightOutputId = pages[boundaryIndex + 1].outputId;
+    remember();
+
+    if (leftOutputId !== rightOutputId) {
+      let segmentEnded = false;
+      setPages((current) => current.map((page, index) => {
+        if (index <= boundaryIndex || segmentEnded) return page;
+        if (page.outputId !== rightOutputId) {
+          segmentEnded = true;
+          return page;
+        }
+        return { ...page, outputId: leftOutputId };
+      }));
+      notify('Ayrım kaldırıldı; iki parça birleştirildi.');
+    } else {
+      const output: OutputGroup = { id: uid(), name: `PDF ${orderedOutputs.length + 1}` };
+      let segmentEnded = false;
+      setOutputs((current) => [...current, output]);
+      setPages((current) => current.map((page, index) => {
+        if (index <= boundaryIndex || segmentEnded) return page;
+        if (page.outputId !== rightOutputId) {
+          segmentEnded = true;
+          return page;
+        }
+        return { ...page, outputId: output.id };
+      }));
+      notify('Yeni bir PDF ayrımı oluşturuldu.');
+    }
+
+    setActiveOutput('all');
     setSelected([]);
-    notify('Sayfaların çıktı hedefi güncellendi.');
   };
 
   const handlePageDrop = (targetId: string) => {
@@ -270,41 +276,22 @@ export default function Home() {
       const from = next.findIndex((page) => page.id === draggedId);
       const to = next.findIndex((page) => page.id === targetId);
       if (from < 0 || to < 0) return current;
+      const targetOutputId = next[to].outputId;
       const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
+      next.splice(to, 0, { ...moved, outputId: targetOutputId });
       return next;
     });
-  };
-
-  const addText = () => {
-    if (selected.length !== 1 || !textDraft.trim()) return;
-    const annotation: TextAnnotation = {
-      id: uid(), text: textDraft.trim(), size: textSize, color: textColor,
-      position: textPosition, align: textAlign,
-    };
-    updatePages((current) => current.map((page) => page.id === selected[0]
-      ? { ...page, annotations: [...page.annotations, annotation] } : page));
-    setAnnotationOpen(false);
-    notify('Metin sayfaya eklendi.');
-  };
-
-  const removeAnnotation = (pageId: string, annotationId: string) => {
-    updatePages((current) => current.map((page) => page.id === pageId
-      ? { ...page, annotations: page.annotations.filter((item) => item.id !== annotationId) } : page));
   };
 
   const exportGroup = async (group: OutputGroup) => {
     const groupPages = pages.filter((page) => page.outputId === group.id);
     if (!groupPages.length) return;
-    const [{ PDFDocument, degrees, rgb }, { default: fontkit }] = await Promise.all([
-      import('pdf-lib'),
-      import('@pdf-lib/fontkit'),
-    ]);
+    if (!group.name.trim()) {
+      notify('Her PDF için bir dosya adı yazmalısın.', 'error');
+      return;
+    }
+    const { PDFDocument, degrees } = await import('pdf-lib');
     const outputDocument = await PDFDocument.create();
-    outputDocument.registerFontkit(fontkit);
-    const fontResponse = await fetch('/noto-sans-latin-ext-400-normal.woff');
-    if (!fontResponse.ok) throw new Error('PDF yazı tipi yüklenemedi.');
-    const font = await outputDocument.embedFont(await fontResponse.arrayBuffer(), { subset: true });
     const loadedSources = new Map<string, Awaited<ReturnType<typeof PDFDocument.load>>>();
 
     for (const pageItem of groupPages) {
@@ -317,23 +304,6 @@ export default function Home() {
       }
       const [copiedPage] = await outputDocument.copyPages(sourceDocument, [pageItem.sourcePageIndex]);
       copiedPage.setRotation(degrees(pageItem.rotation));
-      const { width, height } = copiedPage.getSize();
-
-      for (const annotation of pageItem.annotations) {
-        const hex = annotation.color.replace('#', '');
-        const red = Number.parseInt(hex.slice(0, 2), 16) / 255;
-        const green = Number.parseInt(hex.slice(2, 4), 16) / 255;
-        const blue = Number.parseInt(hex.slice(4, 6), 16) / 255;
-        const textWidth = font.widthOfTextAtSize(annotation.text, annotation.size);
-        const x = annotation.align === 'left' ? 42 : annotation.align === 'right'
-          ? width - textWidth - 42 : (width - textWidth) / 2;
-        const y = annotation.position === 'top' ? height - annotation.size - 42
-          : annotation.position === 'bottom' ? 42 : (height - annotation.size) / 2;
-        copiedPage.drawText(annotation.text, {
-          x: Math.max(16, x), y, size: annotation.size, font,
-          color: rgb(red, green, blue),
-        });
-      }
       outputDocument.addPage(copiedPage);
     }
 
@@ -348,11 +318,14 @@ export default function Home() {
   };
 
   const exportAll = async () => {
+    if (orderedOutputs.some((output) => !output.name.trim())) {
+      notify('Her PDF için bir dosya adı yazmalısın.', 'error');
+      return;
+    }
     setIsExporting(true);
     try {
-      const nonEmptyOutputs = outputs.filter((output) => pages.some((page) => page.outputId === output.id));
-      for (const output of nonEmptyOutputs) await exportGroup(output);
-      notify(`${nonEmptyOutputs.length} PDF dışa aktarıldı.`);
+      for (const output of orderedOutputs) await exportGroup(output);
+      notify(`${orderedOutputs.length} PDF dışa aktarıldı.`);
       setExportOpen(false);
     } catch (error) {
       console.error(error);
@@ -362,7 +335,6 @@ export default function Home() {
     }
   };
 
-  const selectedPage = selectedPages.length === 1 ? selectedPages[0] : null;
   const emptyState = pages.length === 0;
 
   return (
@@ -410,7 +382,7 @@ export default function Home() {
           <button className={`output-row ${activeOutput === 'all' ? 'active' : ''}`} onClick={() => setActiveOutput('all')}>
             <Layers3 size={16} /><span>Tüm sayfalar</span><small>{pages.length}</small>
           </button>
-          {outputs.map((output, index) => {
+          {orderedOutputs.map((output, index) => {
             const count = pages.filter((page) => page.outputId === output.id).length;
             return <button key={output.id} className={`output-row ${activeOutput === output.id ? 'active' : ''}`}
               onClick={() => setActiveOutput(output.id)}>
@@ -428,8 +400,6 @@ export default function Home() {
         <div className="toolbar" aria-label="Düzenleme araçları">
           <div className="tool-group">
             <button className="tool active" title="Seçim aracı"><MousePointer2 size={17} /></button>
-            <button className={`tool ${annotationOpen ? 'active' : ''}`} title="Metin ekle"
-              disabled={selected.length !== 1} onClick={() => setAnnotationOpen((value) => !value)}><Type size={17} /></button>
           </div>
           <span className="divider" />
           <div className="tool-group">
@@ -441,7 +411,6 @@ export default function Home() {
             <span>{selected.length} seçili</span>
             <button onClick={() => rotateSelected(-1)} title="Sola döndür"><RotateCcw size={16} /></button>
             <button onClick={() => rotateSelected(1)} title="Sağa döndür"><RotateCw size={16} /></button>
-            <button onClick={splitSelected} title="Yeni PDF'e ayır"><Scissors size={16} /></button>
             <button className="danger" onClick={deleteSelected} title="Sil"><Trash2 size={16} /></button>
           </div>}
           <div className="zoom-control">
@@ -455,7 +424,7 @@ export default function Home() {
           <div className="welcome-copy">
             <span className="eyebrow"><Sparkles size={14} /> Tarayıcıda. Hızlı. Güvenli.</span>
             <h1>PDF’lerini tek bir<br /><em>akışta düzenle.</em></h1>
-            <p>Birleştir, sırala, böl ve üzerine yaz. Dosyaların bilgisayarından hiç ayrılmadan.</p>
+            <p>Birleştir, sırala, döndür ve dilediğin yerden böl. Dosyaların bilgisayarından hiç ayrılmadan.</p>
           </div>
           <button className={`drop-card ${isDraggingFiles ? 'dragging' : ''}`}
             onClick={() => fileInputRef.current?.click()} onDragLeave={() => setIsDraggingFiles(false)}>
@@ -468,33 +437,50 @@ export default function Home() {
           <div className="feature-strip">
             <span><GripVertical size={16} /> Sürükle & sırala</span>
             <span><Scissors size={16} /> Dilediğin yerden böl</span>
-            <span><Type size={16} /> Metin ekle</span>
+            <span><Download size={16} /> Ayrı PDF’ler oluştur</span>
           </div>
         </div> : <div className="page-stage">
           <div className="stage-heading"><div><span className="eyebrow">DÜZENLEME ALANI</span>
-            <h1>{activeOutput === 'all' ? 'Tüm sayfalar' : outputs.find((item) => item.id === activeOutput)?.name}</h1></div>
-            <div className="stage-meta"><span>{visiblePages.length} sayfa</span>{totalAnnotations > 0 && <span>{totalAnnotations} metin</span>}</div>
+            <h1>{activeOutput === 'all' ? 'Tüm sayfalar' : outputs.find((item) => item.id === activeOutput)?.name}</h1>
+            {activeOutput === 'all' && <p className="stage-hint"><Scissors size={13} /> Sayfa aralarına gelerek PDF’leri böl</p>}</div>
+            <div className="stage-meta"><span>{visiblePages.length} sayfa</span><span>{orderedOutputs.length} PDF</span></div>
           </div>
           <div className="page-grid" style={{ '--card-width': `${Math.round(176 * zoom / 100)}px` } as React.CSSProperties}>
             {visiblePages.map((page, visibleIndex) => {
               const isSelected = selected.includes(page.id);
               const source = sources.find((item) => item.id === page.sourceId);
+              const globalIndex = pages.findIndex((item) => item.id === page.id);
+              const nextPage = pages[globalIndex + 1];
+              const hasSplitAfter = Boolean(nextPage && nextPage.outputId !== page.outputId);
+              const canSplitAfter = activeOutput === 'all' && globalIndex < pages.length - 1;
               return <article key={page.id} className={`page-card ${isSelected ? 'selected' : ''}`} draggable
-                onDragStart={(event) => { dragIdRef.current = page.id; event.dataTransfer.effectAllowed = 'move'; }}
+                onDragStart={(event) => {
+                  if ((event.target as HTMLElement).closest('.split-handle')) {
+                    event.preventDefault();
+                    return;
+                  }
+                  dragIdRef.current = page.id;
+                  event.dataTransfer.effectAllowed = 'move';
+                }}
                 onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.stopPropagation(); handlePageDrop(page.id); }}
                 onClick={(event) => selectPage(page.id, event.metaKey || event.ctrlKey || event.shiftKey)}>
                 <div className="page-sheet" style={{ aspectRatio: `${page.width} / ${page.height}` }}>
                   <img src={page.thumbnail} alt={`${page.sourceName}, sayfa ${page.originalPageNumber}`}
                     style={{ transform: `rotate(${page.rotation}deg) scale(${page.rotation % 180 === 0 ? 1 : page.height / page.width})` }} />
-                  {page.annotations.map((annotation) => <span key={annotation.id}
-                    className={`annotation annotation-${annotation.position} annotation-align-${annotation.align}`}
-                    style={{ color: annotation.color, fontSize: `${Math.max(7, annotation.size * zoom / 210)}px` }}>{annotation.text}</span>)}
                   <span className="page-index">{visibleIndex + 1}</span>
                   <span className="select-check">{isSelected && <Check size={13} strokeWidth={3} />}</span>
                 </div>
                 <div className="page-caption"><span className="source-dot" style={{ background: source?.color }} />
                   <span title={page.sourceName}>{page.sourceName.replace(/\.pdf$/i, '')}</span><small>s.{page.originalPageNumber}</small>
                 </div>
+                {canSplitAfter && <button
+                  className={`split-handle ${hasSplitAfter ? 'active' : ''}`}
+                  aria-label={hasSplitAfter ? 'Bu ayrımı kaldır' : `Sayfa ${globalIndex + 1} sonrasından ayır`}
+                  title={hasSplitAfter ? 'Ayrımı kaldır' : 'Buradan ayır'}
+                  draggable={false}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => { event.stopPropagation(); toggleSplitAfter(page.id); }}
+                ><span><Scissors size={15} /></span></button>}
               </article>;
             })}
             <button className="add-page-card" onClick={() => fileInputRef.current?.click()}><Plus size={22} /><span>PDF ekle</span></button>
@@ -505,61 +491,33 @@ export default function Home() {
       {!emptyState && <aside className="inspector">
         <div className="inspector-head"><span>Özellikler</span>{selected.length > 0 && <small>{selected.length} seçili</small>}</div>
         {!selected.length ? <div className="inspector-empty"><MousePointer2 size={22} /><strong>Bir sayfa seç</strong>
-          <p>Döndürmek, ayırmak veya metin eklemek için bir sayfaya tıkla.</p></div> : <>
-          <section className="inspector-section"><label>Çıktı dosyası</label><div className="select-wrap">
-            <select value={selectedPage?.outputId ?? ''} onChange={(event) => moveSelectedToOutput(event.target.value)}>
-              {selectedPages.some((page) => page.outputId !== selectedPages[0]?.outputId) && <option value="">Birden fazla</option>}
-              {outputs.map((output) => <option key={output.id} value={output.id}>{output.name}</option>)}
-            </select><ChevronDown size={15} /></div>
-            <button className="inspector-button accent" onClick={splitSelected}><Scissors size={16} /> Seçimi yeni PDF’e ayır</button>
-          </section>
+          <p>Döndürmek veya kaldırmak için bir ya da daha fazla sayfaya tıkla.</p></div> : <>
           <section className="inspector-section"><label>Sayfa işlemleri</label><div className="button-grid">
             <button onClick={() => rotateSelected(-1)}><RotateCcw size={16} /> Sola</button>
             <button onClick={() => rotateSelected(1)}><RotateCw size={16} /> Sağa</button>
           </div><button className="inspector-button danger-text" onClick={deleteSelected}><Trash2 size={16} /> Sayfayı kaldır</button></section>
-          {selectedPage && <section className="inspector-section"><div className="label-row"><label>Metinler</label>
-            <button onClick={() => setAnnotationOpen(true)}><Plus size={14} /> Ekle</button></div>
-            {selectedPage.annotations.length ? <div className="annotation-list">{selectedPage.annotations.map((annotation) => <div key={annotation.id}>
-              <span style={{ color: annotation.color }}>Aa</span><p><strong>{annotation.text}</strong><small>{annotation.size} pt · {annotation.position}</small></p>
-              <button aria-label="Metni kaldır" onClick={() => removeAnnotation(selectedPage.id, annotation.id)}><X size={14} /></button>
-            </div>)}</div> : <button className="add-text-card" onClick={() => setAnnotationOpen(true)}><Type size={18} /><span>Bu sayfaya metin ekle</span></button>}
-          </section>}
         </>}
       </aside>}
 
-      {annotationOpen && selectedPage && <div className="popover text-popover" role="dialog" aria-label="Metin ekle">
-        <div className="popover-head"><strong>Metin ekle</strong><button onClick={() => setAnnotationOpen(false)}><X size={17} /></button></div>
-        <label>Metin</label><textarea value={textDraft} onChange={(event) => setTextDraft(event.target.value)} rows={3} autoFocus />
-        <div className="form-row"><div><label>Boyut</label><input type="number" min="8" max="72" value={textSize}
-          onChange={(event) => setTextSize(Number(event.target.value))} /></div>
-          <div><label>Renk</label><input className="color-input" type="color" value={textColor} onChange={(event) => setTextColor(event.target.value)} /></div>
-        </div>
-        <label>Konum</label><div className="segmented">{(['top', 'center', 'bottom'] as const).map((position) => <button key={position}
-          className={textPosition === position ? 'active' : ''} onClick={() => setTextPosition(position)}>
-          {{ top: 'Üst', center: 'Orta', bottom: 'Alt' }[position]}</button>)}</div>
-        <label>Hizalama</label><div className="align-buttons">
-          <button className={textAlign === 'left' ? 'active' : ''} onClick={() => setTextAlign('left')}><AlignLeft size={16} /></button>
-          <button className={textAlign === 'center' ? 'active' : ''} onClick={() => setTextAlign('center')}><AlignCenter size={16} /></button>
-          <button className={textAlign === 'right' ? 'active' : ''} onClick={() => setTextAlign('right')}><AlignRight size={16} /></button>
-        </div><button className="button button-primary full" onClick={addText}>Sayfaya ekle</button>
-      </div>}
-
       {exportOpen && <div className="modal-backdrop" onMouseDown={() => setExportOpen(false)}><section className="export-modal"
         role="dialog" aria-modal="true" aria-label="PDF'leri dışa aktar" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-head"><div><span className="modal-icon"><Download size={20} /></span><div><h2>PDF’lerin hazır</h2>
-          <p>Her çıktı ayrı bir dosya olarak indirilecek.</p></div></div><button onClick={() => setExportOpen(false)}><X size={19} /></button></div>
-        <div className="export-list">{outputs.map((output) => {
+        <div className="modal-head"><div><span className="modal-icon"><Download size={20} /></span><div><h2>PDF adlarını belirle</h2>
+          <p>İndirmeden önce oluşturulacak her dosyaya bir ad ver.</p></div></div><button onClick={() => setExportOpen(false)}><X size={19} /></button></div>
+        <div className="export-list">{orderedOutputs.map((output, outputIndex) => {
           const groupPages = pages.filter((page) => page.outputId === output.id);
           if (!groupPages.length) return null;
-          return <div key={output.id}><span className="pdf-badge">PDF</span><div><input aria-label="Dosya adı" value={output.name}
-            onChange={(event) => setOutputs((current) => current.map((item) => item.id === output.id ? { ...item, name: event.target.value } : item))} />
+          return <div key={output.id}><span className="pdf-badge">PDF</span><div><label className="export-name-label" htmlFor={`output-name-${output.id}`}>PDF {outputIndex + 1} adı</label>
+            <span className="export-name-field"><input id={`output-name-${output.id}`} aria-label={`PDF ${outputIndex + 1} dosya adı`} value={output.name}
+              onChange={(event) => setOutputs((current) => current.map((item) => item.id === output.id
+                ? { ...item, name: event.target.value.replace(/\.pdf$/i, '') } : item))} />
+              <span>.pdf</span></span>
             <small>{groupPages.length} sayfa · tahmini {formatBytes(groupPages.length * 118000)}</small></div>
-            <button aria-label={`${output.name} indir`} disabled={isExporting} onClick={() => void exportGroup(output)}><Download size={17} /></button></div>;
+            <button aria-label={`${output.name || `PDF ${outputIndex + 1}`} indir`} disabled={isExporting || !output.name.trim()} onClick={() => void exportGroup(output)}><Download size={17} /></button></div>;
         })}</div>
         <div className="export-footer"><span><CloudOff size={14} /> Yerel olarak oluşturulur</span>
-          <button className="button button-primary" disabled={isExporting} onClick={() => void exportAll()}>
+          <button className="button button-primary" disabled={isExporting || orderedOutputs.some((output) => !output.name.trim())} onClick={() => void exportAll()}>
             {isExporting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
-            {isExporting ? 'Hazırlanıyor…' : outputs.filter((o) => pages.some((p) => p.outputId === o.id)).length > 1 ? 'Tümünü indir' : 'PDF’i indir'}
+            {isExporting ? 'Hazırlanıyor…' : orderedOutputs.length > 1 ? `${orderedOutputs.length} PDF’i indir` : 'PDF’i indir'}
           </button></div>
       </section></div>}
 
