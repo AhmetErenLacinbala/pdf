@@ -2,7 +2,7 @@ name: kagit-pdf
 
 services:
   app:
-    image: ${IMAGE_NAME:-ghcr.io/your-github-user/kagit-pdf-editor}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_NAME:-ghcr.io/ahmeterenlacinbala/pdf}:${IMAGE_TAG:-latest}
     container_name: kagit-pdf
     restart: unless-stopped
     init: true
@@ -15,14 +15,13 @@ services:
       - traefik
     labels:
       traefik.enable: "true"
-      traefik.docker.network: "${TRAEFIK_NETWORK:-proxy}"
-      traefik.http.routers.kagit-pdf.rule: "Host(`${DOMAIN:?Set DOMAIN in .env}`)"
+      traefik.docker.network: "${TRAEFIK_NETWORK:-apps_web}"
+      traefik.http.routers.kagit-pdf.rule: "Host(`${DOMAIN:-pdf.lacinbala.com}`)"
       traefik.http.routers.kagit-pdf.entrypoints: "websecure"
       traefik.http.routers.kagit-pdf.tls: "true"
-      traefik.http.routers.kagit-pdf.tls.certresolver: "${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      traefik.http.routers.kagit-pdf.tls.certresolver: "${TRAEFIK_CERT_RESOLVER:-le}"
       traefik.http.services.kagit-pdf.loadbalancer.server.port: "8080"
       com.centurylinklabs.watchtower.enable: "true"
-      com.centurylinklabs.watchtower.scope: "${WATCHTOWER_SCOPE:-default}"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
       interval: 30s
@@ -32,5 +31,5 @@ services:
 
 networks:
   traefik:
-    name: ${TRAEFIK_NETWORK:-proxy}
+    name: ${TRAEFIK_NETWORK:-apps_web}
     external: true

@@ -16,8 +16,8 @@ GitHub Actions, `main` dalına yapılan her push sonrasında çoklu mimari Docke
 izleyerek uygulamayı otomatik günceller.
 
 1. `.env.example` dosyasını VPS'te `.env` adıyla kopyalayın.
-2. `IMAGE_NAME`, `DOMAIN` ve mevcut Traefik/Watchtower değerlerini düzenleyin.
-3. Traefik ağının mevcut olduğunu doğrulayın: `docker network inspect proxy`.
+2. Gerekirse `IMAGE_NAME`, `DOMAIN` ve Traefik değerlerini düzenleyin. Dosya mevcut VPS değerleriyle hazır gelir.
+3. Traefik ağının mevcut olduğunu doğrulayın: `docker network inspect apps_web`.
 4. İlk kurulumu başlatın: `docker compose up -d`.
 
 GHCR paketi private ise VPS'te `read:packages` yetkili bir token ile bir kez giriş yapın:
@@ -29,7 +29,6 @@ docker compose up -d
 ```
 
 Mevcut Watchtower servisiniz `--label-enable` kullanıyorsa uygulama hazırdır; compose
-dosyasındaki `com.centurylinklabs.watchtower.enable=true` etiketi eklenmiştir. Watchtower
-scope kullanıyorsa `.env` içindeki `WATCHTOWER_SCOPE` değeri mevcut instance ile aynı olmalıdır.
+dosyasındaki `com.centurylinklabs.watchtower.enable=true` etiketi eklenmiştir.
 Private GHCR imajları için Watchtower'ın Docker giriş bilgilerini içeren `config.json`
 dosyasına erişimi olmalıdır.
