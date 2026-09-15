@@ -30,6 +30,16 @@ type Toast = { id: number; message: string; tone?: 'success' | 'error' };
 const SOURCE_COLORS = ['#7c3aed', '#2563eb', '#ea580c', '#059669', '#db2777'];
 const DEFAULT_OUTPUT: OutputGroup = { id: 'output-1', name: 'PDF 1' };
 const uid = () => crypto.randomUUID();
+const pdfjsAssetUrl = (relativePath: string) => new URL(relativePath, document.baseURI).href;
+
+function pdfImportErrorMessage(error: unknown) {
+  const err = error as { name?: string; message?: string };
+  const message = err?.message ?? '';
+  if (err?.name === 'PasswordException' || /password/i.test(message)) {
+    return 'Bu PDF parola korumalı. Parolayı kaldırıp tekrar dene.';
+  }
+  return 'PDF okunamadı. Dosya bozuk olabilir; sayfayı yenileyip tekrar dene.';
+}
 
 function safeFileName(name: string) {
   const cleaned = name.trim().replace(/[\\/:*?"<>|]+/g, '-');
@@ -160,18 +170,27 @@ export default function Home() {
     setImportProgress('PDF motoru hazırlanıyor…');
     try {
       const pdfjs = await import('pdfjs-dist');
-      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-        'pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url,
-      ).toString();
+      const workerSrc = new URL('pdfjs/pdf.worker.min.mjs', document.baseURI);
+      workerSrc.searchParams.set('v', pdfjs.version);
+      pdfjs.GlobalWorkerOptions.workerSrc = workerSrc.href;
       const newSources: SourceFile[] = [];
       const newPages: PageItem[] = [];
       const appendOutputId = pages.at(-1)?.outputId ?? DEFAULT_OUTPUT.id;
+      const documentOptions = {
+        wasmUrl: pdfjsAssetUrl('pdfjs/wasm/'),
+        cMapUrl: pdfjsAssetUrl('pdfjs/cmaps/'),
+        cMapPacked: true,
+        iccUrl: pdfjsAssetUrl('pdfjs/iccs/'),
+        standardFontDataUrl: pdfjsAssetUrl('pdfjs/standard_fonts/'),
+        useSystemFonts: true,
+        useWorkerFetch: false,
+      };
 
       for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
         const file = files[fileIndex];
         const bytes = new Uint8Array(await file.arrayBuffer());
         const sourceId = uid();
-        const loadingTask = pdfjs.getDocument({ data: bytes.slice() });
+        const loadingTask = pdfjs.getDocument({ data: bytes.slice(), ...documentOptions });
         const pdf = await loadingTask.promise;
         const color = SOURCE_COLORS[(sources.length + fileIndex) % SOURCE_COLORS.length];
         newSources.push({ id: sourceId, name: file.name, bytes, pageCount: pdf.numPages, color });
@@ -198,7 +217,7 @@ export default function Home() {
       notify(`${newSources.length} PDF’den ${newPages.length} sayfa eklendi.`);
     } catch (error) {
       console.error(error);
-      notify('PDF okunamadı. Dosya bozuk veya parola korumalı olabilir.', 'error');
+      notify(pdfImportErrorMessage(error), 'error');
     } finally {
       setIsImporting(false);
       setImportProgress('');

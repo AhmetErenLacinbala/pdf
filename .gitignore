@@ -4,6 +4,9 @@ node_modules/
 # production build
 dist/
 
+# generated PDF.js worker and decoder assets
+public/pdfjs/
+
 # local environment
 .env
 .env.*
