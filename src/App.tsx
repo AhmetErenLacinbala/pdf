@@ -1,7 +1,7 @@
 import {
-  Check, CloudOff, Download,
+  Check, CloudOff, Download, ExternalLink,
   Files, GripVertical, Layers3, LoaderCircle, MousePointer2, Plus, Redo2,
-  RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
+  GitFork, RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
   ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
@@ -498,6 +498,13 @@ export default function Home() {
           </div><button className="inspector-button danger-text" onClick={deleteSelected}><Trash2 size={16} /> Sayfayı kaldır</button></section>
         </>}
       </aside>}
+
+      <footer className="site-footer">
+        <div><GitFork size={15} /><span><strong>Açık kaynak.</strong> Her zaman ücretsiz. Hiçbir zaman reklam olmayacak.</span></div>
+        <a href="https://github.com/AhmetErenLacinbala/pdf" target="_blank" rel="noreferrer">
+          GitHub’da incele <ExternalLink size={13} />
+        </a>
+      </footer>
 
       {exportOpen && <div className="modal-backdrop" onMouseDown={() => setExportOpen(false)}><section className="export-modal"
         role="dialog" aria-modal="true" aria-label="PDF'leri dışa aktar" onMouseDown={(event) => event.stopPropagation()}>
