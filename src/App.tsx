@@ -1,7 +1,7 @@
 import {
-  Check, CloudOff, Download, FileImage, Files, GitFork,
+  Check, CloudOff, Download, FileImage, FileText, Files, GitFork,
   GripVertical, ImagePlus, Layers3, LoaderCircle, MousePointer2, Plus, Redo2,
-  RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
+  Presentation, RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
   ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
@@ -11,9 +11,17 @@ type SourceFile = {
   id: string;
   name: string;
   bytes: Uint8Array;
+  pageImages?: Uint8Array[];
   pageCount: number;
   color: string;
-  kind: 'pdf' | 'image';
+  kind: 'pdf' | 'image' | 'docx' | 'pptx';
+};
+
+type PreparedPage = {
+  bytes: Uint8Array;
+  thumbnail: string;
+  width: number;
+  height: number;
 };
 
 type PageItem = {
@@ -40,9 +48,15 @@ const IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|avif)$/i;
 const IMAGE_MIME_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp', 'image/avif',
 ]);
+const DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const PPTX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const OFFICE_FILE_SIZE_LIMIT = 60 * 1024 * 1024;
 
 const isPdfFile = (file: File) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 const isImageFile = (file: File) => IMAGE_MIME_TYPES.has(file.type) || IMAGE_FILE_PATTERN.test(file.name);
+const isDocxFile = (file: File) => file.type === DOCX_MIME_TYPE || file.name.toLowerCase().endsWith('.docx');
+const isPptxFile = (file: File) => file.type === PPTX_MIME_TYPE || file.name.toLowerCase().endsWith('.pptx');
+const isSupportedFile = (file: File) => isPdfFile(file) || isImageFile(file) || isDocxFile(file) || isPptxFile(file);
 
 function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number) {
   return new Promise<Blob>((resolve, reject) => {
@@ -74,25 +88,179 @@ async function prepareImage(file: File) {
     if (!context) throw new Error('Görsel işleme alanı oluşturulamadı.');
     context.drawImage(image, 0, 0, width, height);
 
-    const thumbnailCanvas = document.createElement('canvas');
-    const thumbnailScale = Math.min(1, 250 / width);
-    thumbnailCanvas.width = Math.max(1, Math.round(width * thumbnailScale));
-    thumbnailCanvas.height = Math.max(1, Math.round(height * thumbnailScale));
-    const thumbnailContext = thumbnailCanvas.getContext('2d', { alpha: false });
-    if (!thumbnailContext) throw new Error('Görsel önizlemesi oluşturulamadı.');
-    thumbnailContext.fillStyle = '#fff';
-    thumbnailContext.fillRect(0, 0, thumbnailCanvas.width, thumbnailCanvas.height);
-    thumbnailContext.drawImage(canvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height);
-
-    const normalizedBlob = await canvasToBlob(canvas, 'image/png');
-    return {
-      bytes: new Uint8Array(await normalizedBlob.arrayBuffer()),
-      thumbnail: thumbnailCanvas.toDataURL('image/jpeg', 0.82),
-      width,
-      height,
-    };
+    return await canvasToPreparedPage(canvas, width, height);
   } finally {
     URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function canvasToPreparedPage(
+  inputCanvas: HTMLCanvasElement,
+  logicalWidth = inputCanvas.width,
+  logicalHeight = inputCanvas.height,
+): Promise<PreparedPage> {
+  const maxDimension = 4096;
+  const scale = Math.min(1, maxDimension / Math.max(inputCanvas.width, inputCanvas.height));
+  const width = Math.max(1, Math.round(inputCanvas.width * scale));
+  const height = Math.max(1, Math.round(inputCanvas.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('Sayfa işleme alanı oluşturulamadı.');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(inputCanvas, 0, 0, width, height);
+
+  const thumbnailCanvas = document.createElement('canvas');
+  const thumbnailScale = Math.min(1, 250 / width);
+  thumbnailCanvas.width = Math.max(1, Math.round(width * thumbnailScale));
+  thumbnailCanvas.height = Math.max(1, Math.round(height * thumbnailScale));
+  const thumbnailContext = thumbnailCanvas.getContext('2d', { alpha: false });
+  if (!thumbnailContext) throw new Error('Sayfa önizlemesi oluşturulamadı.');
+  thumbnailContext.fillStyle = '#fff';
+  thumbnailContext.fillRect(0, 0, thumbnailCanvas.width, thumbnailCanvas.height);
+  thumbnailContext.drawImage(canvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height);
+
+  const normalizedBlob = await canvasToBlob(canvas, 'image/png');
+  return {
+    bytes: new Uint8Array(await normalizedBlob.arrayBuffer()),
+    thumbnail: thumbnailCanvas.toDataURL('image/jpeg', 0.82),
+    width: logicalWidth,
+    height: logicalHeight,
+  };
+}
+
+function createOfficeRenderHost(width = 1200) {
+  const host = document.createElement('div');
+  host.setAttribute('aria-hidden', 'true');
+  Object.assign(host.style, {
+    position: 'fixed',
+    left: '-100000px',
+    top: '0',
+    width: `${width}px`,
+    minHeight: '1px',
+    overflow: 'visible',
+    pointerEvents: 'none',
+    background: '#fff',
+    zIndex: '-1',
+  });
+  document.body.appendChild(host);
+  return host;
+}
+
+async function waitForRenderedAssets(root: HTMLElement) {
+  const images = Array.from(root.querySelectorAll('img'));
+  await Promise.all(images.map((image) => image.complete
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => {
+      image.addEventListener('load', () => resolve(), { once: true });
+      image.addEventListener('error', () => resolve(), { once: true });
+    })));
+  await document.fonts?.ready;
+  await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+}
+
+async function captureOfficePage(element: HTMLElement): Promise<PreparedPage> {
+  await waitForRenderedAssets(element);
+  const rect = element.getBoundingClientRect();
+  const width = Math.max(1, Math.ceil(rect.width || element.offsetWidth));
+  const height = Math.max(1, Math.ceil(rect.height || element.offsetHeight));
+  const maxPixelRatio = Math.min(
+    1.75,
+    4096 / Math.max(width, height),
+    Math.sqrt(14_000_000 / (width * height)),
+  );
+  const { toCanvas } = await import('html-to-image');
+  const canvas = await toCanvas(element, {
+    width,
+    height,
+    pixelRatio: Math.max(0.75, maxPixelRatio),
+    backgroundColor: '#fff',
+    cacheBust: false,
+  });
+  return canvasToPreparedPage(canvas, width, height);
+}
+
+async function prepareDocx(file: File, onProgress: (page: number, total: number) => void) {
+  if (file.size > OFFICE_FILE_SIZE_LIMIT) {
+    throw new Error('Word dosyası 60 MB sınırını aşıyor.');
+  }
+  const buffer = await file.arrayBuffer();
+  const host = createOfficeRenderHost();
+  try {
+    const { renderAsync } = await import('docx-preview');
+    await renderAsync(buffer, host, host, {
+      inWrapper: true,
+      breakPages: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      ignoreLastRenderedPageBreak: false,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      useBase64URL: true,
+    });
+    const elements = Array.from(host.querySelectorAll<HTMLElement>('section.docx'));
+    if (!elements.length) throw new Error('Word belgesinde görüntülenebilir sayfa bulunamadı.');
+    const preparedPages: PreparedPage[] = [];
+    for (let index = 0; index < elements.length; index += 1) {
+      onProgress(index + 1, elements.length);
+      preparedPages.push(await captureOfficePage(elements[index]));
+    }
+    return { bytes: new Uint8Array(buffer), pages: preparedPages };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Bilinmeyen hata';
+    throw new Error(`Word belgesi işlenemedi: ${detail}`, { cause: error });
+  } finally {
+    host.remove();
+  }
+}
+
+async function preparePptx(file: File, onProgress: (page: number, total: number) => void) {
+  if (file.size > OFFICE_FILE_SIZE_LIMIT) {
+    throw new Error('PowerPoint dosyası 60 MB sınırını aşıyor.');
+  }
+  const buffer = await file.arrayBuffer();
+  const host = createOfficeRenderHost(1000);
+  try {
+    const { PptxViewer, RECOMMENDED_ZIP_LIMITS } = await import('@aiden0z/pptx-renderer');
+    const viewer = await PptxViewer.open(buffer, host, {
+      renderMode: 'slide',
+      fitMode: 'none',
+      width: 960,
+      zipLimits: RECOMMENDED_ZIP_LIMITS,
+      lazyMedia: true,
+      lazySlides: true,
+      pdfjs: false,
+    });
+    try {
+      if (!viewer.slideCount) throw new Error('Sunumda görüntülenebilir slayt bulunamadı.');
+      const slideHost = document.createElement('div');
+      host.appendChild(slideHost);
+      const preparedPages: PreparedPage[] = [];
+      for (let index = 0; index < viewer.slideCount; index += 1) {
+        onProgress(index + 1, viewer.slideCount);
+        slideHost.replaceChildren();
+        const handle = viewer.renderSlideToContainer(index, slideHost, 1);
+        if (!handle) throw new Error(`${index + 1}. slayt oluşturulamadı.`);
+        try {
+          await handle.ready;
+          preparedPages.push(await captureOfficePage(handle.element));
+        } finally {
+          handle.dispose();
+        }
+      }
+      return { bytes: new Uint8Array(buffer), pages: preparedPages };
+    } finally {
+      viewer.destroy();
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Bilinmeyen hata';
+    throw new Error(`PowerPoint sunumu işlenemedi: ${detail}`, { cause: error });
+  } finally {
+    host.remove();
   }
 }
 
@@ -102,10 +270,16 @@ function pdfImportErrorMessage(error: unknown) {
   if (err?.name === 'PasswordException' || /password/i.test(message)) {
     return 'Bu PDF parola korumalı. Parolayı kaldırıp tekrar dene.';
   }
+  if (/word|docx|belge/i.test(message)) {
+    return message.includes('60 MB') ? message : 'Word belgesi okunamadı. Geçerli bir .docx dosyası olduğundan emin olun.';
+  }
+  if (/powerpoint|pptx|slayt|sunum/i.test(message)) {
+    return message.includes('60 MB') ? message : 'PowerPoint sunumu okunamadı. Geçerli bir .pptx dosyası olduğundan emin olun.';
+  }
   if (/görsel|tarayıcı tarafından/i.test(message)) {
     return 'Görsel okunamadı. Desteklenen biçimlerden birini deneyin.';
   }
-  return 'PDF okunamadı. Dosya bozuk olabilir; sayfayı yenileyip tekrar dene.';
+  return 'Dosya okunamadı. Dosya bozuk veya desteklenmeyen bir biçimde olabilir.';
 }
 
 function GithubMark() {
@@ -238,21 +412,24 @@ export default function Home() {
   };
 
   const importFiles = async (fileList: FileList | File[], insertAfterPageId: string | null = null) => {
-    const files = Array.from(fileList).filter(
-      (file) => isPdfFile(file) || isImageFile(file),
-    );
+    const files = Array.from(fileList).filter(isSupportedFile);
     if (!files.length) {
-      notify('PDF, PNG, JPG, WebP, GIF, BMP veya AVIF dosyası seçin.', 'error');
+      notify('PDF, DOCX, PPTX veya desteklenen bir görsel seçin.', 'error');
       return;
     }
 
     setIsImporting(true);
     setImportProgress('Dosya işleme motoru hazırlanıyor…');
     try {
-      const pdfjs = await import('pdfjs-dist');
-      const workerSrc = new URL('pdfjs/pdf.worker.min.mjs', document.baseURI);
-      workerSrc.searchParams.set('v', pdfjs.version);
-      pdfjs.GlobalWorkerOptions.workerSrc = workerSrc.href;
+      let pdfjs: typeof import('pdfjs-dist') | null = null;
+      const loadPdfjs = async () => {
+        if (pdfjs) return pdfjs;
+        pdfjs = await import('pdfjs-dist');
+        const workerSrc = new URL('pdfjs/pdf.worker.min.mjs', document.baseURI);
+        workerSrc.searchParams.set('v', pdfjs.version);
+        pdfjs.GlobalWorkerOptions.workerSrc = workerSrc.href;
+        return pdfjs;
+      };
       const newSources: SourceFile[] = [];
       const newPages: PageItem[] = [];
       const insertAfterIndex = insertAfterPageId
@@ -276,8 +453,9 @@ export default function Home() {
         const color = SOURCE_COLORS[(sources.length + fileIndex) % SOURCE_COLORS.length];
 
         if (isPdfFile(file)) {
+          const pdfEngine = await loadPdfjs();
           const bytes = new Uint8Array(await file.arrayBuffer());
-          const loadingTask = pdfjs.getDocument({ data: bytes.slice(), ...documentOptions });
+          const loadingTask = pdfEngine.getDocument({ data: bytes.slice(), ...documentOptions });
           const pdf = await loadingTask.promise;
           newSources.push({ id: sourceId, name: file.name, bytes, pageCount: pdf.numPages, color, kind: 'pdf' });
 
@@ -294,11 +472,11 @@ export default function Home() {
             pdfPage.cleanup();
           }
           await loadingTask.destroy();
-        } else {
+        } else if (isImageFile(file)) {
           setImportProgress(`${file.name} · görsel sayfası hazırlanıyor`);
           const rendered = await prepareImage(file);
           newSources.push({
-            id: sourceId, name: file.name, bytes: rendered.bytes, pageCount: 1,
+            id: sourceId, name: file.name, bytes: rendered.bytes, pageImages: [rendered.bytes], pageCount: 1,
             color, kind: 'image',
           });
           newPages.push({
@@ -306,6 +484,33 @@ export default function Home() {
             sourcePageIndex: 0, originalPageNumber: 1,
             width: rendered.width, height: rendered.height, rotation: 0,
             thumbnail: rendered.thumbnail, outputId: appendOutputId,
+          });
+        } else {
+          const kind = isDocxFile(file) ? 'docx' : 'pptx';
+          const label = kind === 'docx' ? 'sayfa' : 'slayt';
+          const prepared = kind === 'docx'
+            ? await prepareDocx(file, (page, total) => {
+              setImportProgress(`${file.name} · ${page}/${total} ${label} hazırlanıyor`);
+            })
+            : await preparePptx(file, (page, total) => {
+              setImportProgress(`${file.name} · ${page}/${total} ${label} hazırlanıyor`);
+            });
+          newSources.push({
+            id: sourceId,
+            name: file.name,
+            bytes: prepared.bytes,
+            pageImages: prepared.pages.map((page) => page.bytes),
+            pageCount: prepared.pages.length,
+            color,
+            kind,
+          });
+          prepared.pages.forEach((rendered, pageIndex) => {
+            newPages.push({
+              id: uid(), sourceId, sourceName: file.name,
+              sourcePageIndex: pageIndex, originalPageNumber: pageIndex + 1,
+              width: rendered.width, height: rendered.height, rotation: 0,
+              thumbnail: rendered.thumbnail, outputId: appendOutputId,
+            });
           });
         }
       }
@@ -436,16 +641,25 @@ export default function Home() {
       const source = sources.find((item) => item.id === pageItem.sourceId);
       if (!source) continue;
 
-      if (source.kind === 'image') {
-        let embeddedImage = embeddedImages.get(source.id);
+      if (source.kind !== 'pdf') {
+        const imageKey = `${source.id}:${pageItem.sourcePageIndex}`;
+        let embeddedImage = embeddedImages.get(imageKey);
         if (!embeddedImage) {
-          embeddedImage = await outputDocument.embedPng(source.bytes.slice());
-          embeddedImages.set(source.id, embeddedImage);
+          const pageBytes = source.pageImages?.[pageItem.sourcePageIndex]
+            ?? (source.kind === 'image' ? source.bytes : undefined);
+          if (!pageBytes) throw new Error(`${source.name} için sayfa görüntüsü bulunamadı.`);
+          embeddedImage = await outputDocument.embedPng(pageBytes.slice());
+          embeddedImages.set(imageKey, embeddedImage);
         }
-        const landscape = embeddedImage.width > embeddedImage.height;
-        const pageWidth = landscape ? 841.89 : 595.28;
-        const pageHeight = landscape ? 595.28 : 841.89;
-        const margin = 24;
+        const isLooseImage = source.kind === 'image';
+        const landscape = pageItem.width > pageItem.height;
+        const pageWidth = isLooseImage
+          ? (landscape ? 841.89 : 595.28)
+          : pageItem.width * 0.75;
+        const pageHeight = isLooseImage
+          ? (landscape ? 595.28 : 841.89)
+          : pageItem.height * 0.75;
+        const margin = isLooseImage ? 24 : 0;
         const scale = Math.min(
           (pageWidth - margin * 2) / embeddedImage.width,
           (pageHeight - margin * 2) / embeddedImage.height,
@@ -508,7 +722,7 @@ export default function Home() {
       if (event.dataTransfer.types.includes('Files')) setIsDraggingFiles(true);
     }} onDragOver={(event) => event.preventDefault()} onDrop={handleFileDrop}>
       <input ref={fileInputRef} className="sr-only" type="file"
-        accept="application/pdf,.pdf,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
+        accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.pptx,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
         multiple onChange={handleFileInput} />
       <input ref={imageInputRef} className="sr-only" type="file"
         accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
@@ -535,15 +749,20 @@ export default function Home() {
       <aside className="sidebar">
         <section>
           <div className="sidebar-heading"><span>Dosyalar</span>
-            <button aria-label="PDF veya görsel ekle" onClick={() => fileInputRef.current?.click()}><Plus size={16} /></button>
+            <button aria-label="PDF, Word, PowerPoint veya görsel ekle" onClick={() => fileInputRef.current?.click()}><Plus size={16} /></button>
           </div>
           {sources.length ? <div className="source-list">{sources.map((source) => (
             <button key={source.id} className="source-row" onClick={() => setActiveOutput('all')}>
               <span className="source-icon" style={{ '--source-color': source.color } as React.CSSProperties}>
-                {source.kind === 'image' ? <FileImage size={15} /> : <Files size={15} />}
+                {source.kind === 'image' ? <FileImage size={15} />
+                  : source.kind === 'docx' ? <FileText size={15} />
+                    : source.kind === 'pptx' ? <Presentation size={15} /> : <Files size={15} />}
               </span>
               <span className="source-copy"><strong title={source.name}>{source.name}</strong>
-                <small>{source.kind === 'image' ? 'Görsel sayfası' : `${source.pageCount} sayfa`}</small></span>
+                <small>{source.kind === 'image' ? 'Görsel sayfası'
+                  : source.kind === 'pptx' ? `${source.pageCount} slayt`
+                    : source.kind === 'docx' ? `${source.pageCount} Word sayfası`
+                      : `${source.pageCount} sayfa`}</small></span>
             </button>
           ))}</div> : <button className="sidebar-empty" onClick={() => fileInputRef.current?.click()}>
             <Plus size={15} /> İlk dosyanı ekle
@@ -598,19 +817,20 @@ export default function Home() {
           <div className="welcome-copy">
             <span className="eyebrow"><Sparkles size={14} /> Tarayıcıda. Hızlı. Güvenli.</span>
             <h1>PDF’lerini tek bir<br /><em>akışta düzenle.</em></h1>
-            <p>PDF’leri ve görselleri birleştir, sırala, döndür ve dilediğin yerden böl. Dosyaların bilgisayarından hiç ayrılmadan.</p>
+            <p>PDF’leri, Word belgelerini, PowerPoint sunumlarını ve görselleri birleştir, sırala, döndür ve dilediğin yerden böl. Dosyaların bilgisayarından hiç ayrılmadan.</p>
           </div>
           <button className={`drop-card ${isDraggingFiles ? 'dragging' : ''}`}
             onClick={() => fileInputRef.current?.click()} onDragLeave={() => setIsDraggingFiles(false)}>
             <span className="drop-visual"><span className="paper paper-back" />
               <span className="paper paper-front"><span>PDF</span></span><span className="upload-badge"><Upload size={20} /></span>
             </span>
-            <strong>PDF veya görsellerini bırak</strong><span>veya bilgisayarından seç</span>
-            <small>PNG, JPG, WebP, GIF, BMP ve AVIF desteklenir</small>
+            <strong>Dosyalarını buraya bırak</strong><span>veya bilgisayarından seç</span>
+            <small>PDF, DOCX, PPTX, PNG, JPG, WebP, GIF, BMP ve AVIF</small>
           </button>
           <div className="feature-strip">
             <span><GripVertical size={16} /> Sürükle & sırala</span>
             <span><Scissors size={16} /> Dilediğin yerden böl</span>
+            <span><Presentation size={16} /> Word & PowerPoint’tan PDF</span>
             <span><ImagePlus size={16} /> Görseli PDF sayfasına çevir</span>
           </div>
         </div> : <div className="page-stage">
@@ -641,14 +861,18 @@ export default function Home() {
                 <div className="page-sheet" style={{ aspectRatio: `${page.width} / ${page.height}` }}>
                   <img src={page.thumbnail} alt={source?.kind === 'image'
                     ? `${page.sourceName} görsel sayfası`
-                    : `${page.sourceName}, sayfa ${page.originalPageNumber}`}
+                    : source?.kind === 'pptx'
+                      ? `${page.sourceName}, slayt ${page.originalPageNumber}`
+                      : `${page.sourceName}, sayfa ${page.originalPageNumber}`}
                     style={{ transform: `rotate(${page.rotation}deg) scale(${page.rotation % 180 === 0 ? 1 : page.height / page.width})` }} />
                   <span className="page-index">{visibleIndex + 1}</span>
                   <span className="select-check">{isSelected && <Check size={13} strokeWidth={3} />}</span>
                 </div>
                 <div className="page-caption"><span className="source-dot" style={{ background: source?.color }} />
-                  <span title={page.sourceName}>{page.sourceName.replace(/\.(?:pdf|png|jpe?g|webp|gif|bmp|avif)$/i, '')}</span>
-                  <small>{source?.kind === 'image' ? 'görsel' : `s.${page.originalPageNumber}`}</small>
+                  <span title={page.sourceName}>{page.sourceName.replace(/\.(?:pdf|docx|pptx|png|jpe?g|webp|gif|bmp|avif)$/i, '')}</span>
+                  <small>{source?.kind === 'image' ? 'görsel'
+                    : source?.kind === 'pptx' ? `slayt ${page.originalPageNumber}`
+                      : `s.${page.originalPageNumber}`}</small>
                 </div>
                 {canSplitAfter && <div className={`page-gap-controls ${hasSplitAfter ? 'active' : ''}`}
                   draggable={false} onMouseDown={(event) => event.stopPropagation()}>
@@ -665,7 +889,7 @@ export default function Home() {
                 </div>}
               </article>;
             })}
-            <button className="add-page-card" onClick={() => fileInputRef.current?.click()}><Plus size={22} /><span>PDF veya görsel ekle</span></button>
+            <button className="add-page-card" onClick={() => fileInputRef.current?.click()}><Plus size={22} /><span>PDF, Office veya görsel ekle</span></button>
           </div>
         </div>}
       </section>
@@ -713,7 +937,7 @@ export default function Home() {
       {isImporting && <div className="processing" role="status"><LoaderCircle className="spin" size={18} />
         <span><strong>Dosyalar hazırlanıyor</strong>{importProgress}</span></div>}
       {isDraggingFiles && !isImporting && <div className="drop-overlay" onDragLeave={() => setIsDraggingFiles(false)}>
-        <div><Upload size={28} /><strong>Dosyaları bırak</strong><span>PDF ve görseller sayfa akışına eklenecek</span></div></div>}
+        <div><Upload size={28} /><strong>Dosyaları bırak</strong><span>PDF, DOCX, PPTX ve görseller sayfa akışına eklenecek</span></div></div>}
       {toast && <div className={`toast ${toast.tone === 'error' ? 'error' : ''}`} role="status">
         {toast.tone === 'error' ? <X size={15} /> : <Check size={15} />} {toast.message}</div>}
     </main>
