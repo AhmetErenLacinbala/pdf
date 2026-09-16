@@ -1,7 +1,7 @@
 import {
   Check, CloudOff, Download, FileImage, FileText, Files, GitFork,
   GripVertical, ImagePlus, Layers3, LoaderCircle, MousePointer2, Plus, Redo2,
-  Presentation, RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
+  Presentation, RotateCcw, RotateCw, Scissors, Trash2, Undo2, Upload, X,
   ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
@@ -310,6 +310,12 @@ export default function Home() {
   const pastRef = useRef<PageItem[][]>([]);
   const futureRef = useRef<PageItem[][]>([]);
   const dragIdRef = useRef<string | null>(null);
+  const touchDragRef = useRef<{
+    pointerId: number;
+    pageId: string;
+    lastTargetId: string | null;
+    moved: boolean;
+  } | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [sources, setSources] = useState<SourceFile[]>([]);
@@ -323,6 +329,7 @@ export default function Home() {
   const [importProgress, setImportProgress] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [touchDragId, setTouchDragId] = useState<string | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
 
   const visiblePages = useMemo(
@@ -625,6 +632,75 @@ export default function Home() {
     });
   };
 
+  const handleTouchDragStart = (event: React.PointerEvent<HTMLButtonElement>, pageId: string) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    touchDragRef.current = {
+      pointerId: event.pointerId,
+      pageId,
+      lastTargetId: null,
+      moved: false,
+    };
+    setTouchDragId(pageId);
+    setSelected([]);
+  };
+
+  const handleTouchDragMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = touchDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const scrollContainer = event.currentTarget.closest<HTMLElement>('.page-stage');
+    if (scrollContainer) {
+      const bounds = scrollContainer.getBoundingClientRect();
+      const edgeDistance = 72;
+      if (event.clientY < bounds.top + edgeDistance) scrollContainer.scrollBy({ top: -22 });
+      if (event.clientY > bounds.bottom - edgeDistance) scrollContainer.scrollBy({ top: 22 });
+    }
+
+    const target = document.elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>('[data-page-id]');
+    const targetId = target?.dataset.pageId ?? null;
+    if (!targetId || targetId === drag.pageId) {
+      drag.lastTargetId = null;
+      return;
+    }
+    if (targetId === drag.lastTargetId) return;
+    drag.lastTargetId = targetId;
+
+    setPages((current) => {
+      const next = [...current];
+      const from = next.findIndex((page) => page.id === drag.pageId);
+      const to = next.findIndex((page) => page.id === targetId);
+      if (from < 0 || to < 0 || from === to) return current;
+      if (!drag.moved) {
+        pastRef.current = [...pastRef.current.slice(-29), current];
+        futureRef.current = [];
+        drag.moved = true;
+      }
+      const targetOutputId = next[to].outputId;
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, { ...moved, outputId: targetOutputId });
+      return next;
+    });
+  };
+
+  const handleTouchDragEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = touchDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    touchDragRef.current = null;
+    setTouchDragId(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (drag.moved) notify('Sayfa sırası güncellendi.');
+  };
+
   const exportGroup = async (group: OutputGroup) => {
     const groupPages = pages.filter((page) => page.outputId === group.id);
     if (!groupPages.length) return;
@@ -737,20 +813,18 @@ export default function Home() {
           <span><CloudOff size={13} /> Yalnızca bu cihazda</span>
         </div>
         <div className="top-actions">
-          <button className="button button-ghost desktop-only" onClick={() => fileInputRef.current?.click()}>
+          {!emptyState && <button className="button button-ghost" onClick={() => fileInputRef.current?.click()}>
             <Plus size={17} /> Dosya ekle
-          </button>
-          <button className="button button-primary" disabled={emptyState} onClick={() => setExportOpen(true)}>
+          </button>}
+          {!emptyState && <button className="button button-primary" onClick={() => setExportOpen(true)}>
             <Download size={17} /> Dışa aktar
-          </button>
+          </button>}
         </div>
       </header>
 
       <aside className="sidebar">
         <section>
-          <div className="sidebar-heading"><span>Dosyalar</span>
-            <button aria-label="PDF, Word, PowerPoint veya görsel ekle" onClick={() => fileInputRef.current?.click()}><Plus size={16} /></button>
-          </div>
+          <div className="sidebar-heading"><span>Dosyalar</span></div>
           {sources.length ? <div className="source-list">{sources.map((source) => (
             <button key={source.id} className="source-row" onClick={() => setActiveOutput('all')}>
               <span className="source-icon" style={{ '--source-color': source.color } as React.CSSProperties}>
@@ -764,9 +838,7 @@ export default function Home() {
                     : source.kind === 'docx' ? `${source.pageCount} Word sayfası`
                       : `${source.pageCount} sayfa`}</small></span>
             </button>
-          ))}</div> : <button className="sidebar-empty" onClick={() => fileInputRef.current?.click()}>
-            <Plus size={15} /> İlk dosyanı ekle
-          </button>}
+          ))}</div> : <div className="sidebar-placeholder">Henüz dosya yok</div>}
         </section>
 
         <section className="outputs-section">
@@ -789,12 +861,7 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <div className="toolbar" aria-label="Düzenleme araçları">
-          <div className="tool-group">
-            <button className="tool active" title="Seçim aracı"><MousePointer2 size={17} /></button>
-            <button className="tool" title="Görsel sayfası ekle" onClick={() => openImagePicker()}><ImagePlus size={17} /></button>
-          </div>
-          <span className="divider" />
+        {!emptyState && <div className="toolbar" aria-label="Düzenleme araçları">
           <div className="tool-group">
             <button className="tool" title="Geri al" disabled={!pastRef.current.length} onClick={undo}><Undo2 size={17} /></button>
             <button className="tool" title="Yinele" disabled={!futureRef.current.length} onClick={redo}><Redo2 size={17} /></button>
@@ -811,11 +878,10 @@ export default function Home() {
             <span>{zoom}%</span>
             <button aria-label="Yakınlaştır" onClick={() => setZoom((value) => Math.min(130, value + 10))}><ZoomIn size={16} /></button>
           </div>
-        </div>
+        </div>}
 
         {emptyState ? <div className="welcome-wrap">
           <div className="welcome-copy">
-            <span className="eyebrow"><Sparkles size={14} /> Tarayıcıda. Hızlı. Güvenli.</span>
             <h1>PDF’lerini tek bir<br /><em>akışta düzenle.</em></h1>
             <p>PDF’leri, Word belgelerini, PowerPoint sunumlarını ve görselleri birleştir, sırala, döndür ve dilediğin yerden böl. Dosyaların bilgisayarından hiç ayrılmadan.</p>
           </div>
@@ -827,16 +893,10 @@ export default function Home() {
             <strong>Dosyalarını buraya bırak</strong><span>veya bilgisayarından seç</span>
             <small>PDF, DOCX, PPTX, PNG, JPG, WebP, GIF, BMP ve AVIF</small>
           </button>
-          <div className="feature-strip">
-            <span><GripVertical size={16} /> Sürükle & sırala</span>
-            <span><Scissors size={16} /> Dilediğin yerden böl</span>
-            <span><Presentation size={16} /> Word & PowerPoint’tan PDF</span>
-            <span><ImagePlus size={16} /> Görseli PDF sayfasına çevir</span>
-          </div>
         </div> : <div className="page-stage">
           <div className="stage-heading"><div><span className="eyebrow">DÜZENLEME ALANI</span>
             <h1>{activeOutput === 'all' ? 'Tüm sayfalar' : outputs.find((item) => item.id === activeOutput)?.name}</h1>
-            {activeOutput === 'all' && <p className="stage-hint"><ImagePlus size={13} /> Sayfa aralarına görsel ekle veya makasla böl</p>}</div>
+            {activeOutput === 'all' && <p className="stage-hint"><GripVertical size={13} /> Sırala; sayfa aralarından görsel ekle veya böl</p>}</div>
             <div className="stage-meta"><span>{visiblePages.length} sayfa</span><span>{orderedOutputs.length} PDF</span></div>
           </div>
           <div className="page-grid" style={{ '--card-width': `${Math.round(176 * zoom / 100)}px` } as React.CSSProperties}>
@@ -847,9 +907,10 @@ export default function Home() {
               const nextPage = pages[globalIndex + 1];
               const hasSplitAfter = Boolean(nextPage && nextPage.outputId !== page.outputId);
               const canSplitAfter = activeOutput === 'all' && globalIndex < pages.length - 1;
-              return <article key={page.id} className={`page-card ${isSelected ? 'selected' : ''}`} draggable
+              return <article key={page.id} data-page-id={page.id}
+                className={`page-card ${isSelected ? 'selected' : ''} ${touchDragId === page.id ? 'touch-dragging' : ''}`} draggable
                 onDragStart={(event) => {
-                  if ((event.target as HTMLElement).closest('.page-gap-controls')) {
+                  if ((event.target as HTMLElement).closest('.page-gap-controls, .touch-drag-handle')) {
                     event.preventDefault();
                     return;
                   }
@@ -867,6 +928,16 @@ export default function Home() {
                     style={{ transform: `rotate(${page.rotation}deg) scale(${page.rotation % 180 === 0 ? 1 : page.height / page.width})` }} />
                   <span className="page-index">{visibleIndex + 1}</span>
                   <span className="select-check">{isSelected && <Check size={13} strokeWidth={3} />}</span>
+                  <button className="touch-drag-handle" type="button" aria-label={`${visibleIndex + 1}. sayfayı sürükleyerek sırala`}
+                    title="Sayfayı sürükleyerek sırala"
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                    onPointerDown={(event) => handleTouchDragStart(event, page.id)}
+                    onPointerMove={handleTouchDragMove}
+                    onPointerUp={handleTouchDragEnd}
+                    onPointerCancel={handleTouchDragEnd}
+                    onLostPointerCapture={handleTouchDragEnd}>
+                    <GripVertical size={18} />
+                  </button>
                 </div>
                 <div className="page-caption"><span className="source-dot" style={{ background: source?.color }} />
                   <span title={page.sourceName}>{page.sourceName.replace(/\.(?:pdf|docx|pptx|png|jpe?g|webp|gif|bmp|avif)$/i, '')}</span>
@@ -878,18 +949,17 @@ export default function Home() {
                   draggable={false} onMouseDown={(event) => event.stopPropagation()}>
                   <button className="gap-action image-insert" aria-label="Bu araya görsel ekle" title="Bu araya görsel ekle"
                     onClick={(event) => { event.stopPropagation(); openImagePicker(page.id); }}>
-                    <ImagePlus size={14} />
+                    <ImagePlus size={14} /><span className="gap-action-label">Görsel</span>
                   </button>
                   <button className={`gap-action split-handle ${hasSplitAfter ? 'active' : ''}`}
                     aria-label={hasSplitAfter ? 'Bu ayrımı kaldır' : `Sayfa ${globalIndex + 1} sonrasından ayır`}
                     title={hasSplitAfter ? 'Ayrımı kaldır' : 'Buradan ayır'}
                     onClick={(event) => { event.stopPropagation(); toggleSplitAfter(page.id); }}>
-                    <Scissors size={14} />
+                    <Scissors size={14} /><span className="gap-action-label">{hasSplitAfter ? 'Birleştir' : 'Ayır'}</span>
                   </button>
                 </div>}
               </article>;
             })}
-            <button className="add-page-card" onClick={() => fileInputRef.current?.click()}><Plus size={22} /><span>PDF, Office veya görsel ekle</span></button>
           </div>
         </div>}
       </section>
