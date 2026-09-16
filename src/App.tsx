@@ -1,14 +1,19 @@
 import {
-  Check, CloudOff, Download, ExternalLink,
-  Files, GripVertical, Layers3, LoaderCircle, MousePointer2, Plus, Redo2,
-  GitFork, RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
+  Check, CloudOff, Download, FileImage, Files, GitFork,
+  GripVertical, ImagePlus, Layers3, LoaderCircle, MousePointer2, Plus, Redo2,
+  RotateCcw, RotateCw, Scissors, Sparkles, Trash2, Undo2, Upload, X,
   ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { PDFPageProxy } from 'pdfjs-dist';
 
 type SourceFile = {
-  id: string; name: string; bytes: Uint8Array; pageCount: number; color: string;
+  id: string;
+  name: string;
+  bytes: Uint8Array;
+  pageCount: number;
+  color: string;
+  kind: 'pdf' | 'image';
 };
 
 type PageItem = {
@@ -31,6 +36,65 @@ const SOURCE_COLORS = ['#7c3aed', '#2563eb', '#ea580c', '#059669', '#db2777'];
 const DEFAULT_OUTPUT: OutputGroup = { id: 'output-1', name: 'PDF 1' };
 const uid = () => crypto.randomUUID();
 const pdfjsAssetUrl = (relativePath: string) => new URL(relativePath, document.baseURI).href;
+const IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|avif)$/i;
+const IMAGE_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp', 'image/avif',
+]);
+
+const isPdfFile = (file: File) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+const isImageFile = (file: File) => IMAGE_MIME_TYPES.has(file.type) || IMAGE_FILE_PATTERN.test(file.name);
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Görsel dönüştürülemedi.')), type, quality);
+  });
+}
+
+async function prepareImage(file: File) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = new window.Image();
+    image.decoding = 'async';
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error(`${file.name} tarayıcı tarafından okunamadı.`));
+      image.src = objectUrl;
+    });
+
+    const maxDimension = 4096;
+    const sourceWidth = image.naturalWidth;
+    const sourceHeight = image.naturalHeight;
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Görsel işleme alanı oluşturulamadı.');
+    context.drawImage(image, 0, 0, width, height);
+
+    const thumbnailCanvas = document.createElement('canvas');
+    const thumbnailScale = Math.min(1, 250 / width);
+    thumbnailCanvas.width = Math.max(1, Math.round(width * thumbnailScale));
+    thumbnailCanvas.height = Math.max(1, Math.round(height * thumbnailScale));
+    const thumbnailContext = thumbnailCanvas.getContext('2d', { alpha: false });
+    if (!thumbnailContext) throw new Error('Görsel önizlemesi oluşturulamadı.');
+    thumbnailContext.fillStyle = '#fff';
+    thumbnailContext.fillRect(0, 0, thumbnailCanvas.width, thumbnailCanvas.height);
+    thumbnailContext.drawImage(canvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height);
+
+    const normalizedBlob = await canvasToBlob(canvas, 'image/png');
+    return {
+      bytes: new Uint8Array(await normalizedBlob.arrayBuffer()),
+      thumbnail: thumbnailCanvas.toDataURL('image/jpeg', 0.82),
+      width,
+      height,
+    };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
 
 function pdfImportErrorMessage(error: unknown) {
   const err = error as { name?: string; message?: string };
@@ -38,7 +102,21 @@ function pdfImportErrorMessage(error: unknown) {
   if (err?.name === 'PasswordException' || /password/i.test(message)) {
     return 'Bu PDF parola korumalı. Parolayı kaldırıp tekrar dene.';
   }
+  if (/görsel|tarayıcı tarafından/i.test(message)) {
+    return 'Görsel okunamadı. Desteklenen biçimlerden birini deneyin.';
+  }
   return 'PDF okunamadı. Dosya bozuk olabilir; sayfayı yenileyip tekrar dene.';
+}
+
+function GithubMark() {
+  return (
+    <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"
+      />
+    </svg>
+  );
 }
 
 function safeFileName(name: string) {
@@ -53,6 +131,8 @@ function formatBytes(bytes: number) {
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const insertImageAfterRef = useRef<string | null>(null);
   const pastRef = useRef<PageItem[][]>([]);
   const futureRef = useRef<PageItem[][]>([]);
   const dragIdRef = useRef<string | null>(null);
@@ -157,17 +237,17 @@ export default function Home() {
     return { thumbnail: canvas.toDataURL('image/jpeg', 0.76), width: base.width, height: base.height };
   };
 
-  const importFiles = async (fileList: FileList | File[]) => {
+  const importFiles = async (fileList: FileList | File[], insertAfterPageId: string | null = null) => {
     const files = Array.from(fileList).filter(
-      (file) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'),
+      (file) => isPdfFile(file) || isImageFile(file),
     );
     if (!files.length) {
-      notify('Lütfen PDF biçiminde bir dosya seçin.', 'error');
+      notify('PDF, PNG, JPG, WebP, GIF, BMP veya AVIF dosyası seçin.', 'error');
       return;
     }
 
     setIsImporting(true);
-    setImportProgress('PDF motoru hazırlanıyor…');
+    setImportProgress('Dosya işleme motoru hazırlanıyor…');
     try {
       const pdfjs = await import('pdfjs-dist');
       const workerSrc = new URL('pdfjs/pdf.worker.min.mjs', document.baseURI);
@@ -175,7 +255,11 @@ export default function Home() {
       pdfjs.GlobalWorkerOptions.workerSrc = workerSrc.href;
       const newSources: SourceFile[] = [];
       const newPages: PageItem[] = [];
-      const appendOutputId = pages.at(-1)?.outputId ?? DEFAULT_OUTPUT.id;
+      const insertAfterIndex = insertAfterPageId
+        ? pages.findIndex((page) => page.id === insertAfterPageId)
+        : -1;
+      const appendOutputId = (insertAfterIndex >= 0 ? pages[insertAfterIndex] : pages.at(-1))?.outputId
+        ?? DEFAULT_OUTPUT.id;
       const documentOptions = {
         wasmUrl: pdfjsAssetUrl('pdfjs/wasm/'),
         cMapUrl: pdfjsAssetUrl('pdfjs/cmaps/'),
@@ -188,33 +272,56 @@ export default function Home() {
 
       for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
         const file = files[fileIndex];
-        const bytes = new Uint8Array(await file.arrayBuffer());
         const sourceId = uid();
-        const loadingTask = pdfjs.getDocument({ data: bytes.slice(), ...documentOptions });
-        const pdf = await loadingTask.promise;
         const color = SOURCE_COLORS[(sources.length + fileIndex) % SOURCE_COLORS.length];
-        newSources.push({ id: sourceId, name: file.name, bytes, pageCount: pdf.numPages, color });
 
-        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-          setImportProgress(`${file.name} · ${pageNumber}/${pdf.numPages} sayfa hazırlanıyor`);
-          const pdfPage = await pdf.getPage(pageNumber);
-          const rendered = await renderThumbnail(pdfPage);
+        if (isPdfFile(file)) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const loadingTask = pdfjs.getDocument({ data: bytes.slice(), ...documentOptions });
+          const pdf = await loadingTask.promise;
+          newSources.push({ id: sourceId, name: file.name, bytes, pageCount: pdf.numPages, color, kind: 'pdf' });
+
+          for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+            setImportProgress(`${file.name} · ${pageNumber}/${pdf.numPages} sayfa hazırlanıyor`);
+            const pdfPage = await pdf.getPage(pageNumber);
+            const rendered = await renderThumbnail(pdfPage);
+            newPages.push({
+              id: uid(), sourceId, sourceName: file.name,
+              sourcePageIndex: pageNumber - 1, originalPageNumber: pageNumber,
+              width: rendered.width, height: rendered.height, rotation: 0,
+              thumbnail: rendered.thumbnail, outputId: appendOutputId,
+            });
+            pdfPage.cleanup();
+          }
+          await loadingTask.destroy();
+        } else {
+          setImportProgress(`${file.name} · görsel sayfası hazırlanıyor`);
+          const rendered = await prepareImage(file);
+          newSources.push({
+            id: sourceId, name: file.name, bytes: rendered.bytes, pageCount: 1,
+            color, kind: 'image',
+          });
           newPages.push({
             id: uid(), sourceId, sourceName: file.name,
-            sourcePageIndex: pageNumber - 1, originalPageNumber: pageNumber,
+            sourcePageIndex: 0, originalPageNumber: 1,
             width: rendered.width, height: rendered.height, rotation: 0,
             thumbnail: rendered.thumbnail, outputId: appendOutputId,
           });
-          pdfPage.cleanup();
         }
-        await loadingTask.destroy();
       }
 
       remember();
       setSources((current) => [...current, ...newSources]);
-      setPages((current) => [...current, ...newPages]);
+      setPages((current) => {
+        if (!insertAfterPageId) return [...current, ...newPages];
+        const targetIndex = current.findIndex((page) => page.id === insertAfterPageId);
+        if (targetIndex < 0) return [...current, ...newPages];
+        const next = [...current];
+        next.splice(targetIndex + 1, 0, ...newPages);
+        return next;
+      });
       setActiveOutput('all');
-      notify(`${newSources.length} PDF’den ${newPages.length} sayfa eklendi.`);
+      notify(`${newSources.length} dosyadan ${newPages.length} sayfa eklendi.`);
     } catch (error) {
       console.error(error);
       notify(pdfImportErrorMessage(error), 'error');
@@ -222,11 +329,22 @@ export default function Home() {
       setIsImporting(false);
       setImportProgress('');
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (imageInputRef.current) imageInputRef.current.value = '';
+      insertImageAfterRef.current = null;
     }
   };
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files) void importFiles(event.target.files);
+  };
+
+  const handleImageInput = (event: ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) void importFiles(event.target.files, insertImageAfterRef.current);
+  };
+
+  const openImagePicker = (insertAfterPageId: string | null = null) => {
+    insertImageAfterRef.current = insertAfterPageId;
+    imageInputRef.current?.click();
   };
 
   const handleFileDrop = (event: DragEvent) => {
@@ -312,12 +430,41 @@ export default function Home() {
     const { PDFDocument, degrees } = await import('pdf-lib');
     const outputDocument = await PDFDocument.create();
     const loadedSources = new Map<string, Awaited<ReturnType<typeof PDFDocument.load>>>();
+    const embeddedImages = new Map<string, Awaited<ReturnType<typeof outputDocument.embedPng>>>();
 
     for (const pageItem of groupPages) {
+      const source = sources.find((item) => item.id === pageItem.sourceId);
+      if (!source) continue;
+
+      if (source.kind === 'image') {
+        let embeddedImage = embeddedImages.get(source.id);
+        if (!embeddedImage) {
+          embeddedImage = await outputDocument.embedPng(source.bytes.slice());
+          embeddedImages.set(source.id, embeddedImage);
+        }
+        const landscape = embeddedImage.width > embeddedImage.height;
+        const pageWidth = landscape ? 841.89 : 595.28;
+        const pageHeight = landscape ? 595.28 : 841.89;
+        const margin = 24;
+        const scale = Math.min(
+          (pageWidth - margin * 2) / embeddedImage.width,
+          (pageHeight - margin * 2) / embeddedImage.height,
+        );
+        const imageWidth = embeddedImage.width * scale;
+        const imageHeight = embeddedImage.height * scale;
+        const imagePage = outputDocument.addPage([pageWidth, pageHeight]);
+        imagePage.drawImage(embeddedImage, {
+          x: (pageWidth - imageWidth) / 2,
+          y: (pageHeight - imageHeight) / 2,
+          width: imageWidth,
+          height: imageHeight,
+        });
+        imagePage.setRotation(degrees(pageItem.rotation));
+        continue;
+      }
+
       let sourceDocument = loadedSources.get(pageItem.sourceId);
       if (!sourceDocument) {
-        const source = sources.find((item) => item.id === pageItem.sourceId);
-        if (!source) continue;
         sourceDocument = await PDFDocument.load(source.bytes.slice(), { ignoreEncryption: true });
         loadedSources.set(pageItem.sourceId, sourceDocument);
       }
@@ -360,8 +507,12 @@ export default function Home() {
     <main className="app-shell" onDragEnter={(event) => {
       if (event.dataTransfer.types.includes('Files')) setIsDraggingFiles(true);
     }} onDragOver={(event) => event.preventDefault()} onDrop={handleFileDrop}>
-      <input ref={fileInputRef} className="sr-only" type="file" accept="application/pdf,.pdf"
+      <input ref={fileInputRef} className="sr-only" type="file"
+        accept="application/pdf,.pdf,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
         multiple onChange={handleFileInput} />
+      <input ref={imageInputRef} className="sr-only" type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
+        multiple onChange={handleImageInput} />
 
       <header className="topbar">
         <div className="brand" aria-label="Kâğıt PDF Studio">
@@ -373,7 +524,7 @@ export default function Home() {
         </div>
         <div className="top-actions">
           <button className="button button-ghost desktop-only" onClick={() => fileInputRef.current?.click()}>
-            <Plus size={17} /> PDF ekle
+            <Plus size={17} /> Dosya ekle
           </button>
           <button className="button button-primary" disabled={emptyState} onClick={() => setExportOpen(true)}>
             <Download size={17} /> Dışa aktar
@@ -384,15 +535,18 @@ export default function Home() {
       <aside className="sidebar">
         <section>
           <div className="sidebar-heading"><span>Dosyalar</span>
-            <button aria-label="PDF ekle" onClick={() => fileInputRef.current?.click()}><Plus size={16} /></button>
+            <button aria-label="PDF veya görsel ekle" onClick={() => fileInputRef.current?.click()}><Plus size={16} /></button>
           </div>
           {sources.length ? <div className="source-list">{sources.map((source) => (
             <button key={source.id} className="source-row" onClick={() => setActiveOutput('all')}>
-              <span className="source-icon" style={{ '--source-color': source.color } as React.CSSProperties}><Files size={15} /></span>
-              <span className="source-copy"><strong title={source.name}>{source.name}</strong><small>{source.pageCount} sayfa</small></span>
+              <span className="source-icon" style={{ '--source-color': source.color } as React.CSSProperties}>
+                {source.kind === 'image' ? <FileImage size={15} /> : <Files size={15} />}
+              </span>
+              <span className="source-copy"><strong title={source.name}>{source.name}</strong>
+                <small>{source.kind === 'image' ? 'Görsel sayfası' : `${source.pageCount} sayfa`}</small></span>
             </button>
           ))}</div> : <button className="sidebar-empty" onClick={() => fileInputRef.current?.click()}>
-            <Plus size={15} /> İlk PDF’ini ekle
+            <Plus size={15} /> İlk dosyanı ekle
           </button>}
         </section>
 
@@ -419,6 +573,7 @@ export default function Home() {
         <div className="toolbar" aria-label="Düzenleme araçları">
           <div className="tool-group">
             <button className="tool active" title="Seçim aracı"><MousePointer2 size={17} /></button>
+            <button className="tool" title="Görsel sayfası ekle" onClick={() => openImagePicker()}><ImagePlus size={17} /></button>
           </div>
           <span className="divider" />
           <div className="tool-group">
@@ -443,25 +598,25 @@ export default function Home() {
           <div className="welcome-copy">
             <span className="eyebrow"><Sparkles size={14} /> Tarayıcıda. Hızlı. Güvenli.</span>
             <h1>PDF’lerini tek bir<br /><em>akışta düzenle.</em></h1>
-            <p>Birleştir, sırala, döndür ve dilediğin yerden böl. Dosyaların bilgisayarından hiç ayrılmadan.</p>
+            <p>PDF’leri ve görselleri birleştir, sırala, döndür ve dilediğin yerden böl. Dosyaların bilgisayarından hiç ayrılmadan.</p>
           </div>
           <button className={`drop-card ${isDraggingFiles ? 'dragging' : ''}`}
             onClick={() => fileInputRef.current?.click()} onDragLeave={() => setIsDraggingFiles(false)}>
             <span className="drop-visual"><span className="paper paper-back" />
               <span className="paper paper-front"><span>PDF</span></span><span className="upload-badge"><Upload size={20} /></span>
             </span>
-            <strong>PDF’lerini buraya bırak</strong><span>veya bilgisayarından seç</span>
-            <small>Birden fazla dosya seçebilirsin</small>
+            <strong>PDF veya görsellerini bırak</strong><span>veya bilgisayarından seç</span>
+            <small>PNG, JPG, WebP, GIF, BMP ve AVIF desteklenir</small>
           </button>
           <div className="feature-strip">
             <span><GripVertical size={16} /> Sürükle & sırala</span>
             <span><Scissors size={16} /> Dilediğin yerden böl</span>
-            <span><Download size={16} /> Ayrı PDF’ler oluştur</span>
+            <span><ImagePlus size={16} /> Görseli PDF sayfasına çevir</span>
           </div>
         </div> : <div className="page-stage">
           <div className="stage-heading"><div><span className="eyebrow">DÜZENLEME ALANI</span>
             <h1>{activeOutput === 'all' ? 'Tüm sayfalar' : outputs.find((item) => item.id === activeOutput)?.name}</h1>
-            {activeOutput === 'all' && <p className="stage-hint"><Scissors size={13} /> Sayfa aralarına gelerek PDF’leri böl</p>}</div>
+            {activeOutput === 'all' && <p className="stage-hint"><ImagePlus size={13} /> Sayfa aralarına görsel ekle veya makasla böl</p>}</div>
             <div className="stage-meta"><span>{visiblePages.length} sayfa</span><span>{orderedOutputs.length} PDF</span></div>
           </div>
           <div className="page-grid" style={{ '--card-width': `${Math.round(176 * zoom / 100)}px` } as React.CSSProperties}>
@@ -474,7 +629,7 @@ export default function Home() {
               const canSplitAfter = activeOutput === 'all' && globalIndex < pages.length - 1;
               return <article key={page.id} className={`page-card ${isSelected ? 'selected' : ''}`} draggable
                 onDragStart={(event) => {
-                  if ((event.target as HTMLElement).closest('.split-handle')) {
+                  if ((event.target as HTMLElement).closest('.page-gap-controls')) {
                     event.preventDefault();
                     return;
                   }
@@ -484,25 +639,33 @@ export default function Home() {
                 onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.stopPropagation(); handlePageDrop(page.id); }}
                 onClick={(event) => selectPage(page.id, event.metaKey || event.ctrlKey || event.shiftKey)}>
                 <div className="page-sheet" style={{ aspectRatio: `${page.width} / ${page.height}` }}>
-                  <img src={page.thumbnail} alt={`${page.sourceName}, sayfa ${page.originalPageNumber}`}
+                  <img src={page.thumbnail} alt={source?.kind === 'image'
+                    ? `${page.sourceName} görsel sayfası`
+                    : `${page.sourceName}, sayfa ${page.originalPageNumber}`}
                     style={{ transform: `rotate(${page.rotation}deg) scale(${page.rotation % 180 === 0 ? 1 : page.height / page.width})` }} />
                   <span className="page-index">{visibleIndex + 1}</span>
                   <span className="select-check">{isSelected && <Check size={13} strokeWidth={3} />}</span>
                 </div>
                 <div className="page-caption"><span className="source-dot" style={{ background: source?.color }} />
-                  <span title={page.sourceName}>{page.sourceName.replace(/\.pdf$/i, '')}</span><small>s.{page.originalPageNumber}</small>
+                  <span title={page.sourceName}>{page.sourceName.replace(/\.(?:pdf|png|jpe?g|webp|gif|bmp|avif)$/i, '')}</span>
+                  <small>{source?.kind === 'image' ? 'görsel' : `s.${page.originalPageNumber}`}</small>
                 </div>
-                {canSplitAfter && <button
-                  className={`split-handle ${hasSplitAfter ? 'active' : ''}`}
-                  aria-label={hasSplitAfter ? 'Bu ayrımı kaldır' : `Sayfa ${globalIndex + 1} sonrasından ayır`}
-                  title={hasSplitAfter ? 'Ayrımı kaldır' : 'Buradan ayır'}
-                  draggable={false}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={(event) => { event.stopPropagation(); toggleSplitAfter(page.id); }}
-                ><span><Scissors size={15} /></span></button>}
+                {canSplitAfter && <div className={`page-gap-controls ${hasSplitAfter ? 'active' : ''}`}
+                  draggable={false} onMouseDown={(event) => event.stopPropagation()}>
+                  <button className="gap-action image-insert" aria-label="Bu araya görsel ekle" title="Bu araya görsel ekle"
+                    onClick={(event) => { event.stopPropagation(); openImagePicker(page.id); }}>
+                    <ImagePlus size={14} />
+                  </button>
+                  <button className={`gap-action split-handle ${hasSplitAfter ? 'active' : ''}`}
+                    aria-label={hasSplitAfter ? 'Bu ayrımı kaldır' : `Sayfa ${globalIndex + 1} sonrasından ayır`}
+                    title={hasSplitAfter ? 'Ayrımı kaldır' : 'Buradan ayır'}
+                    onClick={(event) => { event.stopPropagation(); toggleSplitAfter(page.id); }}>
+                    <Scissors size={14} />
+                  </button>
+                </div>}
               </article>;
             })}
-            <button className="add-page-card" onClick={() => fileInputRef.current?.click()}><Plus size={22} /><span>PDF ekle</span></button>
+            <button className="add-page-card" onClick={() => fileInputRef.current?.click()}><Plus size={22} /><span>PDF veya görsel ekle</span></button>
           </div>
         </div>}
       </section>
@@ -519,9 +682,9 @@ export default function Home() {
       </aside>}
 
       <footer className="site-footer">
-        <div><GitFork size={15} /><span><strong>Açık kaynak.</strong> Her zaman ücretsiz. Hiçbir zaman reklam olmayacak.</span></div>
-        <a href="https://github.com/AhmetErenLacinbala/pdf" target="_blank" rel="noreferrer">
-          GitHub’da incele <ExternalLink size={13} />
+        <div><GitFork size={15} /><span><strong>Açık kaynak.</strong> Her zaman ücretsiz.</span></div>
+        <a className="footer-github" href="https://github.com/AhmetErenLacinbala/pdf" target="_blank" rel="noreferrer" aria-label="GitHub">
+          <GithubMark />
         </a>
       </footer>
 
@@ -548,9 +711,9 @@ export default function Home() {
       </section></div>}
 
       {isImporting && <div className="processing" role="status"><LoaderCircle className="spin" size={18} />
-        <span><strong>PDF hazırlanıyor</strong>{importProgress}</span></div>}
+        <span><strong>Dosyalar hazırlanıyor</strong>{importProgress}</span></div>}
       {isDraggingFiles && !isImporting && <div className="drop-overlay" onDragLeave={() => setIsDraggingFiles(false)}>
-        <div><Upload size={28} /><strong>PDF’leri bırak</strong><span>Sayfaları hemen düzenlemeye başlayalım</span></div></div>}
+        <div><Upload size={28} /><strong>Dosyaları bırak</strong><span>PDF ve görseller sayfa akışına eklenecek</span></div></div>}
       {toast && <div className={`toast ${toast.tone === 'error' ? 'error' : ''}`} role="status">
         {toast.tone === 'error' ? <X size={15} /> : <Check size={15} />} {toast.message}</div>}
     </main>
